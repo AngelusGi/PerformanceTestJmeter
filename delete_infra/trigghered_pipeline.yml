@@ -1,0 +1,96 @@
+trigger:
+- none
+
+# pool: $(DevTest_AgentPool)
+#pool: $(Hub_AgentPool)
+
+variables:
+  - group: AZU1730-Secret-PerformanceTest
+  - group: AZU1730-DevOps
+
+parameters:
+  - name: project
+    displayName: "Project name (ex. AZE1754)"
+    type: string
+  - name: tokenAuth
+    displayName: "Pipeline Authentication Token"
+    type: string
+
+stages:
+  - stage: AuthenticateProject
+    displayName: "Authenticate project"
+    jobs:
+      - job: AuthenticateProject
+        displayName: "Authenticate project"
+        steps:
+        - task: PowerShell@2
+          enabled: true
+          displayName: "Authenticate project"
+          inputs:
+            filePath: '$(System.DefaultWorkingDirectory)/common/authenticateProject.ps1'
+            arguments: '-EncryptionKey "$(EncryptionKey)" -ProjectAuthToken "${{parameters.tokenAuth}}" -ProjectName "${{parameters.project}}"'
+            pwsh: true
+
+  - stage: DestroyInfrastructure
+    displayName: "Destroy Infrastructure"
+    jobs:
+      - job: DestroyInfrastructure
+        displayName: "Destroy Infrastructure"
+        steps:
+        - task: TerraformInstaller@0
+          displayName: Terraform installer
+          inputs:
+            terraformVersion: '1.3.2'
+
+        - task: TerraformTaskV3@3
+          enabled: true
+          displayName: "Terraform backend init"
+          inputs:
+            provider: 'azurerm'
+            command: 'init'
+            workingDirectory: '$(System.DefaultWorkingDirectory)/delete_infra/terraform'
+            backendServiceArm: $(AZURE_SERVICE_CONNECTION_NAME)
+            backendAzureRmResourceGroupName: $(AzResoruceGroup1730)
+            backendAzureRmStorageAccountName: $(AzStorageAccount1730)
+            backendAzureRmContainerName: $(AzStorageContainer1730)
+            backendAzureRmKey: '${{parameters.project}}.tfstate'
+
+        - task: TerraformTaskV3@3
+          enabled: true
+          displayName: "Terraform destroy infra"
+          inputs:
+            provider: 'azurerm'
+            command: 'destroy'
+            workingDirectory: '$(System.DefaultWorkingDirectory)/delete_infra/terraform'
+            commandOptions: '-auto-approve -input=false -var=AZ_DEVOPS_TOKEN="$(admin-pat-create-project-library)" -var=AZ_DEVOPS_URL="$(az-devops-org-url)"'
+            environmentServiceNameAzureRM: $(AZURE_SERVICE_CONNECTION_NAME)
+
+        - task: PowerShell@2
+          enabled: false
+          displayName: "Remove secret from project library"
+          inputs:
+            filePath: '$(System.DefaultWorkingDirectory)/delete_infra/script/removeLibrarySecrets.ps1'
+            arguments: '-AzDevOpsPat "$(admin-pat)" -ProjectName ${{parameters.project}}'
+            pwsh: true
+
+        - task: AzureCLI@2
+          displayName: "Delete NSG rules"
+          enabled: true
+          inputs:
+            azureSubscription: $(AZURE_SERVICE_CONNECTION_NAME)
+            scriptType: 'pscore'
+            scriptLocation: 'scriptPath'
+            addSpnToEnvironment: true
+            scriptPath: '$(System.DefaultWorkingDirectory)/delete_infra/script/deleteNsgRule.ps1'
+            arguments: '-ProjectName "${{ parameters.project }}" -AzRgName "$(AzCommonResourceGroup)" -AzNsgName "$(AzCommonNsg)"'
+
+        - task: AzureCLI@2
+          displayName: "Update table record"
+          enabled: true
+          inputs:
+            azureSubscription: $(AZURE_SERVICE_CONNECTION_NAME)
+            scriptType: 'pscore'
+            scriptLocation: 'scriptPath'
+            addSpnToEnvironment: true
+            scriptPath: '$(System.DefaultWorkingDirectory)/delete_infra/script/updateStorageTableRecord.ps1'
+            arguments: '-AzRgName "$(AzResoruceGroup1730)" -AzStgAccName "$(AzStorageAccount1730)" -AzStorageAccountTable "$(AzStorageTable1730)" -ProjectName "${{parameters.project}}"'

@@ -1,0 +1,156 @@
+trigger:
+- none
+
+# pool: $(DevTest_AgentPool)
+pool: $(Hub_AgentPool)
+# pool: "SHAgent_linux_Ubuntu22_04_SnamTestEnv"
+
+variables:
+  - group: AZU1730-Secret-PerformanceTest
+  - group: AZU1730-DevOps
+
+parameters:
+  - name: project
+    displayName: "Project name (ex. AZE1754)"
+    type: string
+  - name: testTimespan
+    displayName: "Test time span in minutes (ex. 100)"
+    type: number
+  - name: tokenAuth
+    displayName: "Pipeline Authentication Token"
+    type: string
+
+jobs:
+- job: 'ProjectVerification'
+  steps:
+  - task: PowerShell@2
+    enabled: true
+    displayName: "Test timespan limit compliance"
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/script/verifyTimespan.ps1'
+      arguments: '-TestTimespan ${{parameters.testTimespan}} -TimeSpanLimit $(performance-test-time-limit)'
+      pwsh: true
+
+  - task: PowerShell@2
+    enabled: true
+    displayName: "Authenticate project"
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)/common/authenticateProject.ps1'
+      arguments: '-EncryptionKey "$(EncryptionKey)" -ProjectAuthToken "${{parameters.tokenAuth}}" -ProjectName "${{parameters.project}}"'
+      pwsh: true
+  
+  - task: AzureCLI@2
+    displayName: "Any other test is running"
+    name: OtherRunningTest
+    enabled: true
+    inputs:
+      azureSubscription: $(AZURE_SERVICE_CONNECTION_NAME)
+      scriptType: 'pscore'
+      scriptLocation: 'scriptPath'
+      addSpnToEnvironment: true
+      scriptPath: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/script/verifyAnyRunningPerformanceTest.ps1'
+      arguments: '-ProjectName "${{ parameters.project }}" -AzRgName "$(AzResoruceGroup1730)" -AzStgAccName "$(AzStorageAccount1730)" -AzStorageAccountTable "$(AzStorageTable1730)"'
+
+- job: 'CreateInfrastructureIaC'
+  dependsOn: 'ProjectVerification'
+  condition: succeeded()
+  steps:
+  - task: TerraformInstaller@0
+    enabled: true
+    displayName: "Terraform install"
+    inputs:
+      terraformVersion: '1.3.2'
+
+  - task: TerraformTaskV3@3
+    enabled: true
+    displayName: "Terraform init infra"
+    inputs:
+      provider: 'azurerm'
+      command: 'init'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/terraform'
+      backendServiceArm: $(AZURE_SERVICE_CONNECTION_NAME)
+      backendAzureRmResourceGroupName: $(AzResoruceGroup1730)
+      backendAzureRmStorageAccountName: $(AzStorageAccount1730)
+      backendAzureRmContainerName: $(AzStorageContainer1730)
+      backendAzureRmKey: "${{parameters.project}}.tfstate"
+
+  - task: TerraformTaskV3@3
+    enabled: true
+    displayName: "Terraform plan infra"
+    inputs:
+      provider: 'azurerm'
+      command: 'plan'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/terraform'
+      commandOptions: '-out=azutf -var=DEVOPS_TEAM_RESOURCE_GROUP="$(AzResoruceGroup1730)" -var=DEVOPS_TEAM_VNET="$(AzCommonVnet)" -var=DEVOPS_TEAM_SUBNET="$(AzCommonSubnet)" -var=PERFORMANCE_TEST_VNET_RESOURCE_GROUP="$(AzCommonResourceGroup)" -var=PERFORMANCE_TEST_VNET="$(AzCommonVnet)" -var=PERFORMANCE_TEST_SUBNET="$(AzCommonSubnet)" -var=PROJECT="${{ parameters.project }}" -var=AZ_DEVOPS_TOKEN="$(admin-pat-create-project-library)" -var=AZ_DEVOPS_URL="$(az-devops-org-url)"'
+      environmentServiceNameAzureRM: $(AZURE_SERVICE_CONNECTION_NAME)
+
+  - task: TerraformTaskV3@3
+    enabled: true
+    name: createInfra
+    displayName: "Terraform create infra"
+    inputs:
+      provider: 'azurerm'
+      command: 'apply'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/terraform'
+      commandOptions: '-auto-approve -input=false azutf'
+      environmentServiceNameAzureRM: $(AZURE_SERVICE_CONNECTION_NAME)
+
+  - task: TerraformTaskV3@3
+    enabled: true
+    displayName: "Terraform export output"
+    name: TerraformOutput
+    inputs:
+      provider: 'azurerm'
+      command: 'output'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/terraform'
+      environmentServiceNameAzureRM: $(AZURE_SERVICE_CONNECTION_NAME)
+
+  - task: PowerShell@2
+    enabled: true
+    displayName: "Export Terraform output to pipeline"
+    inputs:
+      targetType: 'inline'
+      script: |
+        $jsonPath = "$(TerraformOutput.jsonOutputVariablesPath)"
+        $json = Get-Content -Path $jsonPath | Out-String | ConvertFrom-Json
+        foreach ($prop in $json.psobject.properties) {
+            Write-Host("##vso[task.setvariable variable=$($prop.Name);issecret=true]$($prop.Value.value)")
+        }
+        remove-item $jsonPath -force
+      workingDirectory: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/terraform'
+      pwsh: true
+
+  - task: AzureCLI@2
+    displayName: "Record test on storage table"
+    enabled: true
+    inputs:
+      azureSubscription: $(AZURE_SERVICE_CONNECTION_NAME)
+      scriptType: 'pscore'
+      scriptLocation: 'scriptPath'
+      addSpnToEnvironment: true
+      scriptPath: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/script/createStorageTableRecord.ps1'
+      arguments: '-ProjectRgName "$(RESOURCE_GROUP_NAME)" -ProjectStgAccName "$(STORAGE_ACCOUNT_NAME)" -ProjectName "${{ parameters.project }}" -AzRgName "$(AzResoruceGroup1730)" -AzStgAccName "$(AzStorageAccount1730)" -AzStorageAccountTable "$(AzStorageTable1730)" -TestTimeSpan "${{ parameters.testTimespan }}"'
+
+  - task: PowerShell@2
+    enabled: false
+    displayName: "Set token in project library"
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/script/setLibrarySecrets.ps1'
+      arguments: '-StorageAccountSas "$(STORAGE_PRIMARY_KEY)" -StorageAccountUrl "$(STORAGE_NFS_URL)" -AzDevOpsPat "$(admin-pat)" -ProjectName ${{parameters.project}}'
+      pwsh: true
+
+- job: 'DestroyInfrastructureIaC'
+  dependsOn:
+    - 'ProjectVerification'
+    - 'CreateInfrastructureIaC'
+  variables:
+    destroyOnFail: $[ dependencies.ProjectVerification.outputs['OtherRunningTest.destroyInfraOnFail'] ]
+  condition: and( failed(), eq( variables.destroyOnFail , 'true' ) )
+  steps:
+  - task: PowerShell@2
+    enabled: true
+    displayName: "Destroy Infrastructure"
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/script/destroyInfra.ps1'
+      arguments: '-ProjectAuthToken "${{parameters.tokenAuth}}" -ProjectName "${{parameters.project}}" -AzDevOpsPat "$(admin-pat)" -ExecutionBranch "$(Build.SourceBranch)"'
+      pwsh: true

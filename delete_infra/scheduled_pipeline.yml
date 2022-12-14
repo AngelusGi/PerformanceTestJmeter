@@ -1,0 +1,29 @@
+schedules:
+  - cron: "0 * * * *"
+    displayName: Every 1 hours, Monday through Sunday #CRON uses UTC timezone
+    branches:
+      include:
+        - uat
+    always: true
+
+trigger:
+- none
+
+# pool: $(DevTest_AgentPool)
+pool: $(Hub_AgentPool)
+
+variables:
+  - group: AZU1730-Secret-PerformanceTest
+  - group: AZU1730-DevOps
+
+steps:
+- task: AzureCLI@2
+  displayName: "Get outbound projects"
+  enabled: true
+  inputs:
+    azureSubscription: $(AZURE_SERVICE_CONNECTION_NAME)
+    scriptType: 'pscore'
+    scriptLocation: 'scriptPath'
+    addSpnToEnvironment: true
+    scriptPath: '$(System.DefaultWorkingDirectory)/delete_infra/script/findDeployToDelete.ps1'
+    arguments: '-AzRgName "$(AzResoruceGroup1730)" -AzStgAccName "$(AzStorageAccount1730)" -AzStorageAccountTable "$(AzStorageTable1730)" -ExecutionBranch "$(Build.SourceBranch)" -AzDevOpsPat "$(admin-pat-noprod)"'

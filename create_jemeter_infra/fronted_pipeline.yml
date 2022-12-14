@@ -1,0 +1,29 @@
+trigger:
+- none
+
+# pool: $(DevTest_AgentPool)
+pool: $(Hub_AgentPool)
+
+variables:
+  - group: AZU1730-DevOps
+
+parameters:
+  - name: project
+    displayName: "Project name (ex. AZE1754)"
+    type: string
+  - name: testTimespan
+    displayName: "Test time span in minutes (ex. 100)"
+    type: number
+  - name: tokenAuth
+    displayName: "Pipeline Authentication Token"
+    type: string
+
+jobs:
+- job:
+  steps:
+  - task: PowerShell@2
+    enabled: true
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/script/destroyInfra.ps1'
+      arguments: '-ProjectAuthToken "${{parameters.tokenAuth}}" -ProjectName "${{parameters.project}}" -AzDevOpsPat "$(admin-pat)" -ExecutionBranch "$(Build.SourceBranch)"'
+      pwsh: true

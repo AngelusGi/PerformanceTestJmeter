@@ -1,0 +1,24 @@
+trigger:
+- none
+
+# pool: $(DevTest_AgentPool)
+pool: $(Hub_AgentPool)
+
+variables:
+  - group: AZU1730-Secret-PerformanceTest
+  - group: AZU1730-DevOps
+
+parameters:
+  - name: project
+    displayName: "Project name (ex. AZE1754)"
+    type: string
+
+steps:
+
+- task: PowerShell@2
+  enabled: true
+  displayName: "Create project library"
+  inputs:
+    filePath: './create_project_library/script/createProjectLibrary.ps1'
+    arguments: '-ProjectName "${{ parameters.project }}" -AzDevOpsPat "$(admin-pat)" -TriggerPat "$(Trigger-PAT)" -EncryptionKey "$(EncryptionKey)"'
+    pwsh: true

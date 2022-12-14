@@ -1,0 +1,22 @@
+trigger:
+- none
+
+# pool: $(DevTest_AgentPool)
+pool: $(Hub_AgentPool)
+# pool: "SHAgent_linux_Ubuntu22_04_SnamTestEnv"
+
+variables:
+ - group: AZU1730-Secret-PerformanceTest
+ - group: AZU1730-DevOps
+
+steps:
+- task: AzureCLI@2
+  displayName: 'Build and Push JMeter Docker image'
+  inputs:
+    azureSubscription: $(AZURE_SERVICE_CONNECTION_NAME)
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      # wget "https://raw.githubusercontent.com/Azure-Samples/jmeter-aci-terraform/main/docker/Dockerfile" -P $(Build.SourcesDirectory)/docker/
+      ls -la $(Build.SourcesDirectory)/docker/
+      az acr build -t $(JMETER_DOCKER_IMAGE) -r $(AzCommonAcr) -f $(Build.SourcesDirectory)/docker/Dockerfile $(Build.SourcesDirectory)/docker

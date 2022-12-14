@@ -1,0 +1,161 @@
+trigger:
+- none
+
+pool: $(Hub_AgentPool)
+# pool: $(DevTest_AgentPool)
+# pool: "SHAgent_linux_Ubuntu22_04_SnamTestEnv"
+
+variables:
+  - group: AZU1730-Secret-PerformanceTest
+  - group: AZU1730-DevOps
+
+parameters:
+  - name: project
+    displayName: "Project name (ex. AZE1754)"
+    type: string
+  - name: workerNodes
+    displayName: "Woker nodes numbers (ex. 3)"
+    type: number
+  - name: tokenAuth
+    displayName: "Pipeline Authentication Token"
+    type: string
+  - name: jmeterJMXFile
+    displayName: "Jmeter JMX Test Definition File"
+    type: string
+
+jobs:
+- job: 'ProjectVerification'
+  steps:
+  - task: PowerShell@2
+    enabled: true
+    displayName: "Authenticate project"
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)/common/authenticateProject.ps1'
+      arguments: '-EncryptionKey "$(EncryptionKey)" -ProjectAuthToken "${{parameters.tokenAuth}}" -ProjectName "${{parameters.project}}"'
+      pwsh: true
+
+- job: 'CreateContainers'
+  dependsOn: 'ProjectVerification'
+  steps:
+  - task: AzureCLI@2
+    displayName: "Retrieve data from storage table"
+    enabled: true
+    inputs:
+      azureSubscription: $(AZURE_SERVICE_CONNECTION_NAME)
+      scriptType: 'pscore'
+      scriptLocation: 'scriptPath'
+      addSpnToEnvironment: true
+      scriptPath: '$(System.DefaultWorkingDirectory)/create_aci/script/retrieveProjectRecordOnStorageTable.ps1'
+      arguments: '-ProjectName "${{ parameters.project }}" -AzRgName "$(AzResoruceGroup1730)" -AzStgAccName "$(AzStorageAccount1730)" -AzStorageAccountTable "$(AzStorageTable1730)"'
+
+  - task: TerraformInstaller@0
+    enabled: true
+    displayName: "Terraform install"
+    inputs:
+      terraformVersion: '1.3.2'
+
+  - task: TerraformTaskV3@3
+    enabled: true
+    displayName: "Terraform init infra"
+    inputs:
+      provider: 'azurerm'
+      command: 'init'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/create_aci/terraform'
+      backendServiceArm: $(AZURE_SERVICE_CONNECTION_NAME)
+      backendAzureRmResourceGroupName: $(AzResoruceGroup1730)
+      backendAzureRmStorageAccountName: $(AzStorageAccount1730)
+      backendAzureRmContainerName: $(AzStorageContainer1730)
+      backendAzureRmKey: "${{parameters.project}}.tfstate"
+
+  - task: TerraformTaskV3@3
+    enabled: true
+    displayName: "Terraform plan infra"
+    inputs:
+      provider: 'azurerm'
+      command: 'plan'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/create_aci/terraform'
+      commandOptions: '-out=azutf -var=JMETER_WORKERS_COUNT="${{ parameters.workerNodes }}" -var=JMETER_JMX_FILE="${{ parameters.jmeterJMXFile }}" -var=JMETER_ACR_NAME="$(AzCommonAcr)" -var=JMETER_ACR_RESOURCE_GROUP_NAME="$(AzCommonResourceGroup)" -var=SHARE_NAME=$(performance-test-share-name) -var=PERFORMANCE_TEST_VNET_RESOURCE_GROUP="$(AzCommonResourceGroup)" -var=PERFORMANCE_TEST_VNET="$(AzCommonVnet)" -var=PERFORMANCE_TEST_SUBNET="$(AzCommonSubnet)" -var=PROJECT="${{ parameters.project }}" -var=AZ_DEVOPS_TOKEN="$(admin-pat-create-project-library)" -var=AZ_DEVOPS_URL="$(az-devops-org-url)"'
+      environmentServiceNameAzureRM: $(AZURE_SERVICE_CONNECTION_NAME)
+
+  - task: TerraformTaskV3@3
+    enabled: true
+    name: createInfra
+    displayName: "Terraform create infra"
+    inputs:
+      provider: 'azurerm'
+      command: 'apply'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/create_aci/terraform'
+      commandOptions: '-auto-approve -input=false azutf'
+      environmentServiceNameAzureRM: $(AZURE_SERVICE_CONNECTION_NAME)
+
+  - task: TerraformTaskV3@3
+    enabled: true
+    displayName: "Terraform output"
+    name: TerraformOutput
+    inputs:
+      provider: 'azurerm'
+      command: 'output'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/create_aci/terraform'
+      environmentServiceNameAzureRM: $(AZURE_SERVICE_CONNECTION_NAME)
+
+  - task: PowerShell@2
+    enabled: true
+    displayName: "Export Terraform output to pipeline"
+    inputs:
+      targetType: 'inline'
+      script: |
+        $jsonPath = "$(TerraformOutput.jsonOutputVariablesPath)"
+        Write-Host "Terraform outputh path > $jsonPath"
+        $json = Get-Content -Path $jsonPath | Out-String | ConvertFrom-Json
+        foreach ($prop in $json.psobject.properties) {
+            Write-Host("##vso[task.setvariable variable=$($prop.Name);]$($prop.Value.value)")
+        }
+      workingDirectory: '$(System.DefaultWorkingDirectory)/create_aci/terraform'
+      pwsh: true
+
+  - task: AzureCLI@2
+    displayName: "Create NSG rules"
+    enabled: true
+    condition: succeeded()
+    inputs:
+      azureSubscription: $(AZURE_SERVICE_CONNECTION_NAME)
+      scriptType: 'pscore'
+      scriptLocation: 'scriptPath'
+      addSpnToEnvironment: true
+      scriptPath: '$(System.DefaultWorkingDirectory)/create_aci/script/updateNsgRule.ps1'
+      arguments: '-ProjectName "${{ parameters.project }}" -AzRgName "$(AzCommonResourceGroup)" -AzNsgName "$(AzCommonNsg)" -JmeterControllerIp "$(JMETER_CONTROLLER_IP)" -JmeterWorkersIp "$(JMETER_WORKER_IPS)" -ShaSubnet "$(AzSubnetSha1730)"'
+
+  - task: AzureCLI@2
+    displayName: "Wait test execution"
+    enabled: true
+    condition: succeeded()
+    inputs:
+      azureSubscription: $(AZURE_SERVICE_CONNECTION_NAME)
+      scriptType: 'pscore'
+      scriptLocation: 'scriptPath'
+      addSpnToEnvironment: true
+      scriptPath: '$(System.DefaultWorkingDirectory)/create_aci/script/waitTestExecution.ps1'
+      arguments: '-AzRgName "$(AzResoruceGroup1730)" -AzStgAccName "$(AzStorageAccount1730)" -AzStorageAccountTable "$(AzStorageTable1730)" -JmeterControllerName "$(JMETER_CONTROLLER_NAME)" -ProjectName ${{parameters.project}} -AzProjectRgName "$(PF_RESOURCE_GROUP_NAME)" -JmeterJmxFileName "${{ parameters.jmeterJMXFile }}"'
+
+- job: 'DestroyInfrastructureIaC'
+  dependsOn:
+    - 'CreateContainers'
+  condition: failed() # this job will only run if 'CreateInfrastructureIaC' fails
+  steps:
+  - task: PowerShell@2
+    enabled: true
+    displayName: "Destroy Infrastructure"
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)/create_jemeter_infra/script/destroyInfra.ps1'
+      arguments: '-ProjectAuthToken "${{parameters.tokenAuth}}" -ProjectName "${{parameters.project}}" -AzDevOpsPat "$(admin-pat)" -ExecutionBranch "$(Build.SourceBranch)"'
+      pwsh: true
+
+  - task: PowerShell@2
+    enabled: false
+    displayName: "Return error to project caller"
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Warning "This task will fail to send process fail to calling project"
+        exit 1
+      failOnStderr: true
